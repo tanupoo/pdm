@@ -1,0 +1,133 @@
+#!/usr/bin/env python
+
+from Crypto.Cipher import AES
+from Crypto.Hash import SHA256
+from os import getenv, path
+from shutil import copy2
+import argparse
+import subprocess
+from getpass import getpass
+import sys
+import tempfile
+
+# size must be either 16, 24, 32
+key_size = 32
+
+def pdm_encrypt(pdm_plain_data, key):
+    cipher = AES.new(key, AES.MODE_CTR, nonce=get_nonce(key))
+    return cipher.encrypt(pdm_plain_data)
+
+def get_nonce(key):
+    assert len(key) > 16
+    return bytes([key[_]^key[8+_] for _ in range(8)])
+
+def pdm_decrypt(pdm_enc_data, key):
+    cipher = AES.new(key, AES.MODE_CTR, nonce=get_nonce(key))
+    return cipher.decrypt(pdm_enc_data)
+
+def justify_key(key):
+    if len(key) <= key_size:
+        return key.ljust(key_size, b"\x30")
+    # folding
+    kb_list = [key[p:p+key_size] for p in range(0,len(key),key_size)]
+    for kb in kb_list[1:]:
+        for i in range(key_size):
+            if i >= len(kb):
+                break
+            kb_list[0][i] ^= kb[i]
+    return kb_list[0]
+
+def get_key():
+    orig_key = getpass("Passwords: ")
+    if len(orig_key) > key_size:
+        len(orig_key)%key_size
+    return justify_key(orig_key.encode("utf-8"))
+
+def show_content(pdm_file, key):
+    pager = (getenv("PAGER") or "/usr/bin/more")
+    pdm_plain_data = pdm_decrypt(open(pdm_file,"rb").read(), key)
+    p = subprocess.Popen(pager, stdin=subprocess.PIPE, stdout=sys.stdout)
+    p.stdin.write(pdm_plain_data)
+    p.stdin.close()
+    p.wait()
+
+def query_yes():
+    prompt = " [y/N] "
+    choice = input("Overwrite ? [y/N]: ").lower()
+    if not choice:
+        return False
+    elif choice in ["y", "yes"]:
+        return True
+    else:
+        return False
+
+def edit_tmp_file(content):
+    editor = (getenv("VISUAL") or getenv("EDITOR") or 'vi')
+    with tempfile.NamedTemporaryFile(mode='w+b') as tmpfile:
+        tmpfile.write(content)
+        tmpfile.flush()
+        subprocess.check_call([editor or get_editor(), tmpfile.name])
+        tmpfile.seek(0)
+        return tmpfile.read().strip()
+
+def backup_file(orig_file):
+    if not path.exists(orig_file):
+        return
+    copy2(orig_file, orig_file+".bak")
+
+def edit_content(pdm_file, key):
+    pdm_plain_data = pdm_decrypt(open(pdm_file,"rb").read(), key)
+    pdm_plan_data_new = edit_tmp_file(pdm_plain_data)
+    if query_yes():
+        backup_file(pdm_file+".bak")
+        backup_file(pdm_file)
+        pdm_enc_data = pdm_encrypt(pdm_plan_data_new, key)
+        with open(pdm_file, "wb") as fd:
+            fd.write(pdm_enc_data)
+            fd.flush()
+        print("Replaced.")
+    else:
+        print("Not replaced.")
+
+#
+# main
+#
+ap = argparse.ArgumentParser(
+        description="a personal information manager.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+ap.add_argument("-s", action="store_true", dest="mode_show",
+                help="specify the mode to show the content.")
+ap.add_argument("-e", action="store_true", dest="mode_edit",
+                help="specify the mode to edit the key file.")
+ap.add_argument("-g", action="store_true", dest="mode_grep",
+                help="specify the mode to search a key.")
+ap.add_argument("-G", action="store_true", dest="mode_show_key",
+                help="specify the mode to show the key.")
+ap.add_argument("-f", action="store", dest="pdm_file",
+                help="specify the key file. default is PDM_FILE")
+ap.add_argument("-v", action="store_true", dest="verbose",
+                default=False, help="enable verbose mode.")
+opt = ap.parse_args()
+
+if 1 != sum([opt.mode_show, opt.mode_edit, opt.mode_grep, opt.mode_show_key]):
+    ap.print_help()
+    exit(1)
+
+if opt.pdm_file is None:
+    pdm_file = getenv("PDM_FILE")
+    if pdm_file is None:
+        ap.print_help()
+        exit(1)
+else:
+    pdm_file = opt.pdm_file
+
+if opt.mode_show:
+    show_content(pdm_file, get_key())
+elif opt.mode_edit:
+    edit_content(pdm_file, get_key())
+elif opt.mode_show_key:
+    key = get_key()
+    print("***KEY***")
+    print(key)
+elif opt.mode_grep:
+    pass
